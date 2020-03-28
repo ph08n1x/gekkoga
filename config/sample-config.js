@@ -1,19 +1,19 @@
 const randomExt = require('random-ext');
 
 const config = {
-  stratName: 'MACD',
+  stratName: 'fourema_stop_v2',
   gekkoConfig: {
     watch: {
-      exchange: 'poloniex',
-      currency: 'USDT',
+      exchange: 'gdax',
+      currency: 'EUR',
       asset: 'BTC'
     },
 
 //    daterange: 'scan',
 
     daterange: {
-      from: '2018-01-01 00:00',
-      to: '2018-02-01 00:00'
+      from: '2018-02-02',
+      to: '2020-03-09'
     },
 
     simulationBalance: {
@@ -24,19 +24,19 @@ const config = {
     slippage: 0.05,
     feeTaker: 0.25,
     feeMaker: 0.15,
-    feeUsing: 'taker', // maker || taker
+    feeUsing: 'maker', // maker || taker
 
   },
   apiUrl: 'http://localhost:3000',
 
   // Population size, better reduce this for larger data
-  populationAmt: 20,
+  populationAmt: 30,
 
   // How many completely new units will be added to the population (populationAmt * variation must be a whole number!!)
   variation: 0.5,
 
   // How many components maximum to mutate at once
-  mutateElements: 7,
+  mutateElements: 20,
 
   // How many parallel queries to run at once
   parallelqueries: 5,
@@ -48,7 +48,12 @@ const config = {
   // score = ideas? feedback?
   // profit = recommended!
   // profitForMinSharpe = same as profit but sharpe will never be lower than minSharpe
-  mainObjective: 'profitForMinSharpe',
+  // profitForTestFold = use average of profit and profit from test data (outside of training data)
+  mainObjective: 'profitForTestFold',
+
+  // K Fold values
+  cyclesPerSet: 20,
+  kFolds: 5,
 
   // optionally recieve and archive new all time high every new all time high
   notifications: {
@@ -61,20 +66,16 @@ const config = {
     },
   },
 
-  candleValues: [5,10,15,30,60,120,240],
+  candleValues: [60,240,1440],
   getProperties: () => ({
 
-    historySize: randomExt.integer(100, 20),
-
-    short: randomExt.integer(15,5),
-    long: randomExt.integer(40,15),
-    signal: randomExt.integer(12,6),
-
-    thresholds: {
-      up: randomExt.float(20,0).toFixed(2),
-      down: randomExt.float(0,-20).toFixed(2),
-      persistence: randomExt.integer(9,0),
-    },
+    historySize: randomExt.integer(30, 10),
+    weightone: randomExt.integer(10, 5),
+    weighttwo: randomExt.integer(20, 11),
+    weightthree: randomExt.integer(54, 21),
+    weightfour: randomExt.integer(500, 55),
+    stopLoss: randomExt.float(0, -0.5),
+    moveStopLossProf: randomExt.float(1, 0),
 
     candleSize: randomExt.pick(config.candleValues)
   })
