@@ -6,10 +6,11 @@ const { some } = require('bluebird');
 const fs = require('fs-extra');
 const flat = require('flat');
 const util = require('util');
+const moment = require('moment');
 
 class Ga {
 
-  constructor({ gekkoConfig, stratName, mainObjective, populationAmt, parallelqueries, minSharpe, variation, mutateElements, notifications, getProperties, apiUrl }, configName ) {
+  constructor({ gekkoConfig, stratName, mainObjective, populationAmt, parallelqueries, minSharpe, variation, mutateElements, notifications, getProperties, apiUrl, cyclesPerSet, kFolds }, configName ) {
     this.configName = configName.replace(/\.js|config\//gi, "");
     this.stratName = stratName;
     this.mainObjective = mainObjective;
@@ -61,8 +62,8 @@ class Ga {
           roundtrips: false,
           stratCandles: true,
           stratCandleProps: [
-              'close',
-              'start'
+            'close',
+            'start'
           ],
           trades: false
         }
@@ -73,6 +74,31 @@ class Ga {
       },
       valid: true
     };
+
+    // Cross validation vars
+    this.cyclesPerSet = cyclesPerSet;
+    this.currCycle = 1;
+    this.kFoldsNumber = kFolds;
+    this.kFoldsSets = [];
+    // Now split date into k fold parts
+    if (gekkoConfig.daterange && gekkoConfig.daterange.from && gekkoConfig.daterange.to) {
+      const from = moment.utc(gekkoConfig.daterange.from);
+      const to = moment.utc(gekkoConfig.daterange.to);
+      const diffInMs = Math.abs(moment(from).diff(to));
+      const foldTimeRange = diffInMs / this.kFoldsNumber;
+
+      for(let i = 1; i <= this.kFoldsNumber; i++) {
+        this.kFoldsSets.push({
+          from: moment(from).add(foldTimeRange * (i - 1), 'ms').utc().format(),
+          to: moment(from).add(foldTimeRange * i, 'ms').utc().format()
+        });
+        moment(from).add(foldTimeRange * i, 'ms')
+      }
+    }
+    else {
+      console.log('No from or to dates for K-fold date range cross validation')
+    }
+
 
 
   }
@@ -190,54 +216,88 @@ class Ga {
     return flat.unflatten(flattened);
   }
 
+  calcFitness(i, totalProfit, totalTestProfit) {
+    // TODO: Make fn that works
+    // IF PROFIT > 0 GOOD
+    // IF PROFIT < 0 BAD
+
+  }
+
   // For the given population and fitness, returns new population and max score
-  runEpoch(population, populationProfits, populationSharpes, populationScores) {
+  runEpoch(population, populationProfits, populationSharpes, populationScores, populationTestProfits) {
     let selectionProb = [];
     let fitnessSum = 0;
-    let maxFitness = [0, 0, 0, 0];
+    let testFitnessSum = 0;
+    let maxFitness = [0, 0, 0, 0, -10000];
 
     for (let i = 0; i < this.populationAmt; i++) {
 
-     if (this.mainObjective == 'score') {
+      if (this.mainObjective === 'score') {
 
-       if (populationProfits[i] < 0 && populationSharpes[i] < 0) {
+        if (populationProfits[i] < 0 && populationSharpes[i] < 0) {
 
-         populationScores[i] = (populationProfits[i] * populationSharpes[i]) * -1;
+          populationScores[i] = (populationProfits[i] * populationSharpes[i]) * -1;
 
-       } else {
+        } else {
 
-         populationScores[i] = Math.tanh(populationProfits[i] / 3) * Math.tanh(populationSharpes[i] / 0.25);
+          populationScores[i] = Math.tanh(populationProfits[i] / 3) * Math.tanh(populationSharpes[i] / 0.25);
 
-       }
+        }
 
-       if (populationScores[i] > maxFitness[2]) {
+        if (populationScores[i] > maxFitness[2]) {
 
-         maxFitness = [populationProfits[i], populationSharpes[i], populationScores[i], i];
+          maxFitness = [populationProfits[i], populationSharpes[i], populationScores[i], i, 0];
 
-       }
+        }
 
-     } else if (this.mainObjective == 'profit') {
+      } else if (this.mainObjective === 'profit') {
 
         if (populationProfits[i] > maxFitness[0]) {
 
-          maxFitness = [populationProfits[i], populationSharpes[i], populationScores[i], i];
+          maxFitness = [populationProfits[i], populationSharpes[i], populationScores[i], i, 0];
 
         }
 
-      } else if (this.mainObjective == 'profitForMinSharpe') {
+      } else if (this.mainObjective === 'profitForMinSharpe') {
 
         if (populationProfits[i] > maxFitness[0] && populationSharpes[i] >= this.minSharpe) {
 
-          maxFitness = [populationProfits[i], populationSharpes[i], populationScores[i], i];
+          maxFitness = [populationProfits[i], populationSharpes[i], populationScores[i], i, 0];
 
         }
 
+      } else if (this.mainObjective === 'profitForTestFold') {
+        // console.log(`Prof ${populationProfits[i]} > ${maxFitness[0]} && ${populationTestProfits[i]} > ${maxFitness[4]}`);
+        if (populationProfits[i] > maxFitness[0] && populationTestProfits[i] >= maxFitness[4]) {
+
+          maxFitness = [populationProfits[i], populationSharpes[i], populationScores[i], i, populationTestProfits[i]];
+
+        }
       }
-
-      fitnessSum += populationProfits[i];
-
     }
 
+    // If one profit is negative then change range to start from 0
+    const lowestProf = Math.min.apply(null, populationProfits);
+    // console.log(lowestProf);
+    if (lowestProf < 0) {
+      populationProfits.forEach((prof, i) => {
+        populationProfits[i] += -lowestProf;
+        populationProfits[i] = populationProfits[i];
+      });
+    }
+    fitnessSum = populationProfits.reduce((tot, el) => tot + el);
+
+    const lowestTestProf = Math.min.apply(null, populationTestProfits);
+    // console.log(lowestTestProf);
+    if (lowestTestProf < 0) {
+      populationTestProfits.forEach((prof, i) => {
+        populationTestProfits[i] += -lowestTestProf;
+      });
+    }
+    testFitnessSum = populationTestProfits.reduce((tot, el) => tot + el);
+
+    console.log('Fitness sum:', fitnessSum);
+    console.log('Test fitness sum:', testFitnessSum);
     if (fitnessSum === 0) {
 
       for (let j = 0; j < this.populationAmt; j++) {
@@ -248,21 +308,32 @@ class Ga {
 
     } else {
       for (let j = 0; j < this.populationAmt; j++) {
-        selectionProb[j] = populationProfits[j] / fitnessSum;
+        const currEpochFitness = populationProfits[j] / fitnessSum;
+        if (testFitnessSum !== 0) {
+          console.log(`Candidate ${j}; fitness: ${currEpochFitness}, test fit: ${populationTestProfits[j] / testFitnessSum}, profit: ${populationProfits[j]}, test prof: ${populationTestProfits[j]}`);
+        }
+        selectionProb[j] = testFitnessSum === 0 ? currEpochFitness : (((currEpochFitness + (populationTestProfits[j] / testFitnessSum)) / 2));
       }
 
     }
+
+    console.log('selection probs: ', selectionProb);
+    const selectionProbSum = selectionProb.reduce((tot,val) => tot + val);
+    console.log('sum of probs: ', selectionProbSum);
 
     let newPopulation = [];
 
     while (newPopulation.length < this.populationAmt * (1 - this.variation)) {
 
       let a, b;
-      let selectedProb = randomExt.float(1, 0);
+      let selectedProb = randomExt.float(selectionProbSum, 0);
+      // console.log('pre select prop: ',selectedProb);
 
       for (let k = 0; k < this.populationAmt; k++) {
-
+        // console.log('select pop prop:', selectionProb[k]);
         selectedProb -= selectionProb[k];
+
+        // console.log('select prop: ',selectedProb);
 
         if (selectedProb <= 0) {
 
@@ -272,7 +343,7 @@ class Ga {
         }
 
       }
-      selectedProb = randomExt.float(1, 0);
+      selectedProb = randomExt.float(selectionProbSum, 0);
 
       for (let k = 0; k < this.populationAmt; k++) {
 
@@ -286,6 +357,9 @@ class Ga {
         }
 
       }
+
+      // console.log('a:', a);
+      // console.log('b:', b);
 
       let res = this.crossover(this.mutate(a, this.mutateElements), this.mutate(b, this.mutateElements));
       newPopulation.push(res[0]);
@@ -321,13 +395,27 @@ class Ga {
   }
 
   // Calls api for every element in testSeries and returns gain for each
-  async fitnessApi(testsSeries) {
+  async fitnessApi(testsSeries, isTestSet = false) {
 
     const numberOfParallelQueries = this.parallelqueries;
 
     const results = await this.queue(testsSeries, numberOfParallelQueries, async (data) => {
 
       const outconfig = this.getConfig(data);
+
+      // TODO: use correct fold date range depending on cycle
+      if (isTestSet) {
+        outconfig.backtest.daterange.from = this.kFoldsSets[this.currCycle].from;
+        outconfig.backtest.daterange.to = this.kFoldsSets[this.currCycle].to;
+        console.log(`Using test fold: ${outconfig.backtest.daterange.from} TO ${outconfig.backtest.daterange.to}`);
+      }
+      else {
+        outconfig.backtest.daterange.from = this.kFoldsSets[0].from;
+        outconfig.backtest.daterange.to = this.kFoldsSets[this.currCycle].to;
+        console.log(`Normal train fold: ${outconfig.backtest.daterange.from} TO ${outconfig.backtest.daterange.to}`);
+      }
+
+
       const body = await rp.post({
         url: `${this.apiUrl}/api/backtest`,
         json: true,
@@ -389,15 +477,19 @@ class Ga {
     let populationScores;
     let populationProfits;
     let populationSharpes;
+    let populationTestProfits;
     let otherPopulationMetrics;
     let allTimeMaximum = {
       parameters: {},
       score: -5,
       profit: -5,
+      testProfit: -5000000,
       sharpe: -5,
       epochNumber: 0,
-      otherMetrics: {}
+      otherMetrics: {},
     };
+    let finishAllFolds = false;
+
 
     if (loaded_config) {
 
@@ -409,13 +501,15 @@ class Ga {
       populationProfits = this.previousBestParams.profit;
       populationSharpes = this.previousBestParams.sharpe;
       otherPopulationMetrics = this.previousBestParams.otherMetrics;
+      populationTestProfits = this.previousBestParams.testProfit;
       allTimeMaximum = {
         parameters: this.previousBestParams.parameters,
         score: this.previousBestParams.score,
         profit: this.previousBestParams.profit,
         sharpe: this.previousBestParams.sharpe,
         epochNumber: this.previousBestParams.epochNumber,
-        otherMetrics: this.previousBestParams.otherMetrics
+        otherMetrics: this.previousBestParams.otherMetrics,
+        testProfit: this.previousBestParams.testProfit,
       };
 
       console.log('Resuming previous run...');
@@ -428,10 +522,24 @@ class Ga {
 
     console.log(`Starting GA with epoch populations of ${this.populationAmt}, running ${this.parallelqueries} units at a time!`);
 
-    while (1) {
+    while (!finishAllFolds) {
 
       const startTime = new Date().getTime();
       const res = await this.fitnessApi(population);
+
+      if (parseInt(epochNumber / this.cyclesPerSet) > (this.currCycle - 1)) {
+        const testRes = await this.fitnessApi(population, true);
+        populationTestProfits = testRes.profits;
+        this.currCycle++;
+        // Update cycle, finish if we gone through all folds
+        if (this.currCycle === this.kFoldsNumber) {
+          finishAllFolds = true;
+          console.log('========== FINAL TEST =============');
+        }
+      }
+      else {
+        populationTestProfits = new Array(population.length).fill(0);
+      }
 
       populationScores = res.scores;
       populationProfits = res.profits;
@@ -440,56 +548,69 @@ class Ga {
 
       let endTime = new Date().getTime();
       epochNumber++;
-      let results = this.runEpoch(population, populationProfits, populationSharpes, populationScores);
+      let results = this.runEpoch(population, populationProfits, populationSharpes, populationScores, populationTestProfits);
       let newPopulation = results[0];
       let maxResult = results[1];
       let score = maxResult[2];
       let profit = maxResult[0];
       let sharpe = maxResult[1];
       let position = maxResult[3];
+      let testProfit = maxResult[4];
 
       this.notifynewhigh = false;
       if (this.mainObjective == 'score') {
         if (score >= allTimeMaximum.score) {
-            this.notifynewhigh = true;
-            allTimeMaximum.parameters = population[position];
-            allTimeMaximum.otherMetrics = otherPopulationMetrics[position];
-            allTimeMaximum.score = score;
-            allTimeMaximum.profit = profit;
-            allTimeMaximum.sharpe = sharpe;
-            allTimeMaximum.epochNumber = epochNumber;
-
+          this.notifynewhigh = true;
+          allTimeMaximum.parameters = population[position];
+          allTimeMaximum.otherMetrics = otherPopulationMetrics[position];
+          allTimeMaximum.score = score;
+          allTimeMaximum.profit = profit;
+          allTimeMaximum.sharpe = sharpe;
+          allTimeMaximum.epochNumber = epochNumber;
         }
       } else if (this.mainObjective == 'profit') {
         if (profit >= allTimeMaximum.profit) {
-            this.notifynewhigh = true;
-            allTimeMaximum.parameters = population[position];
-            allTimeMaximum.otherMetrics = otherPopulationMetrics[position];
-            allTimeMaximum.score = score;
-            allTimeMaximum.profit = profit;
-            allTimeMaximum.sharpe = sharpe;
-            allTimeMaximum.epochNumber = epochNumber;
+          this.notifynewhigh = true;
+          allTimeMaximum.parameters = population[position];
+          allTimeMaximum.otherMetrics = otherPopulationMetrics[position];
+          allTimeMaximum.score = score;
+          allTimeMaximum.profit = profit;
+          allTimeMaximum.sharpe = sharpe;
+          allTimeMaximum.epochNumber = epochNumber;
 
         }
       } else if (this.mainObjective == 'profitForMinSharpe') {
         if (profit >= allTimeMaximum.profit && sharpe >= this.minSharpe) {
-            this.notifynewhigh = true;
-            allTimeMaximum.parameters = population[position];
-            allTimeMaximum.otherMetrics = otherPopulationMetrics[position];
-            allTimeMaximum.score = score;
-            allTimeMaximum.profit = profit;
-            allTimeMaximum.sharpe = sharpe;
-            allTimeMaximum.epochNumber = epochNumber;
+          this.notifynewhigh = true;
+          allTimeMaximum.parameters = population[position];
+          allTimeMaximum.otherMetrics = otherPopulationMetrics[position];
+          allTimeMaximum.score = score;
+          allTimeMaximum.profit = profit;
+          allTimeMaximum.sharpe = sharpe;
+          allTimeMaximum.epochNumber = epochNumber;
 
+        }
+      } else if (this.mainObjective == 'profitForTestFold') {
+        if (testProfit !== 0 && testProfit > allTimeMaximum.testProfit) {
+          this.notifynewhigh = true;
+          allTimeMaximum.parameters = population[position];
+          allTimeMaximum.otherMetrics = otherPopulationMetrics[position];
+          allTimeMaximum.score = score;
+          allTimeMaximum.profit = profit;
+          allTimeMaximum.sharpe = sharpe;
+          allTimeMaximum.epochNumber = epochNumber;
+          allTimeMaximum.testProfit = testProfit;
         }
       }
 
       console.log(`
     --------------------------------------------------------------
+    Cycle Number: ${this.currCycle} / ${this.kFoldsNumber}
     Epoch number: ${epochNumber}
     Time it took (seconds): ${(endTime - startTime) / 1000}
     Max score: ${score}
     Max profit: ${profit} ${this.currency}
+    Max Test profit: ${testProfit} ${this.currency}
     Max sharpe: ${sharpe}
     Max profit position: ${position}
     Max parameters:
@@ -514,10 +635,11 @@ class Ga {
     Global Maximums:
     Score: ${allTimeMaximum.score}
     Profit: ${allTimeMaximum.profit} ${this.currency}
+    Test Profit: ${allTimeMaximum.testProfit}
     Sharpe: ${allTimeMaximum.sharpe}
     parameters: \n\r`,
-    util.inspect(allTimeMaximum.parameters, false, null),
-    `
+        util.inspect(allTimeMaximum.parameters, false, null),
+        `
     Global maximum so far:
     `,
         allTimeMaximum.otherMetrics,

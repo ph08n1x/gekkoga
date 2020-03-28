@@ -1,4 +1,4 @@
-const Ga = require('./');
+const Ga = require('./index');
 const fs = require('fs');
 
 var runGA = require('commander');
